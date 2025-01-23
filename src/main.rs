@@ -84,6 +84,7 @@ impl TestProcessor {
             .lines()
             .filter(|line| line.contains("test"))
             .map(|line| line.trim().strip_suffix(": test").unwrap_or(line.trim()))
+            .filter(|line| line.ends_with("1"))
             .collect::<Vec<_>>();
 
         // Used to retrieve the block and instruction count from a string as below
