@@ -1,9 +1,9 @@
 use regex::Regex;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::time::Instant;
 use xlsxwriter::Workbook;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TestMetrics {
     name: String,
     duration: f64,
@@ -17,12 +17,9 @@ struct TestProcessor {
 }
 
 impl TestProcessor {
-    fn new(
-        project_path: std::path::PathBuf,
-        excel_path: &str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(project_path: std::path::PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(TestProcessor {
-            workbook: Workbook::new(excel_path)?,
+            workbook: Workbook::new(EXCEL_PATH)?,
             project_path,
         })
     }
@@ -39,8 +36,8 @@ impl TestProcessor {
         // Write data
         for (i, metric) in metrics.iter().enumerate() {
             let row = (i + 1) as u32;
-
-            sheet.write_string(row, 0, &metric.name, None)?;
+            let cleaned_test_name = metric.name.split("::").last().unwrap();
+            sheet.write_string(row, 0, &cleaned_test_name, None)?;
             sheet.write_number(row, 1, metric.duration, None)?;
             sheet.write_number(row, 2, metric.blocks as f64, None)?;
             sheet.write_number(row, 3, metric.instructions as f64, None)?;
@@ -96,6 +93,7 @@ impl TestProcessor {
             let test_name = test.split_whitespace().next().unwrap();
             let start = Instant::now();
             let output = self.run_single_test(test_name);
+            let test_name = test_name.strip_suffix("_1").unwrap_or(test_name);
             let duration = start.elapsed().as_secs_f64();
             if let Some(captures) = re.captures(&output) {
                 println!("Processing test: {}", test_name);
@@ -127,8 +125,41 @@ impl TestProcessor {
 
         Ok(metrics)
     }
+
+    fn combine_metrics(&self, metrics: &[Vec<TestMetrics>]) -> Vec<TestMetrics> {
+        let mut combined_metrics: Vec<TestMetrics> = Vec::new();
+        for test_metrics in metrics {
+            for metric in test_metrics {
+                let existing_metric = combined_metrics.iter_mut().find(|m| m.name == metric.name);
+                match existing_metric {
+                    Some(existing_metric) => {
+                        existing_metric.duration += metric.duration;
+                        existing_metric.instructions += metric.instructions;
+                        existing_metric.blocks += metric.blocks;
+                    }
+                    None => {
+                        combined_metrics.push(metric.clone());
+                    }
+                }
+            }
+        }
+
+        combined_metrics
+            .iter()
+            .map(|m| TestMetrics {
+                name: m.name.clone(),
+                duration: m.duration / metrics.len() as f64,
+                instructions: m.instructions / metrics.len(),
+                blocks: m.blocks / metrics.len(),
+            })
+            .collect()
+    }
 }
 
+const EXCEL_PATH: &str = "test_metrics.xlsx";
+const PROJECT_NAME: &str = "aarch64-air-lifter"; // Replace with the actual project folder name
+const WARMUP_RUNS: usize = 5;
+const TEST_RUNS: usize = 20;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_dir = std::env::current_dir()?;
     let parent_dir = current_dir
@@ -136,17 +167,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Failed to get parent directory")?;
 
     // set variables
-    let excel_path = "test_metrics.xlsx";
-    let project_name = "aarch64-air-lifter"; // Replace with the actual project folder name
-    let project_path = parent_dir.join(project_name);
+    let project_path = parent_dir.join(PROJECT_NAME);
 
     if !project_path.exists() {
-        return Err(format!("Project folder '{}' does not exist", project_name).into());
+        return Err(format!("Project folder '{}' does not exist", PROJECT_NAME).into());
     }
 
-    let mut processor = TestProcessor::new(project_path, excel_path)?;
+    let mut processor = TestProcessor::new(project_path)?;
 
-    let metrics = processor.process_tests()?;
+    println!("Total warmup runs: {}", WARMUP_RUNS);
+    for i in 0..WARMUP_RUNS {
+        println!("Warmup run: {}", i + 1);
+        processor.process_tests()?;
+    }
+
+    let mut benchmark_metrics = Vec::new();
+    println!("Total test runs: {}", TEST_RUNS);
+    for i in 0..TEST_RUNS {
+        println!("Test run: {}", i);
+        let metrics = processor.process_tests()?;
+        benchmark_metrics.push(metrics);
+    }
+    let metrics = processor.combine_metrics(&benchmark_metrics);
     processor.write_metrics(&metrics)?;
     Ok(())
 }
